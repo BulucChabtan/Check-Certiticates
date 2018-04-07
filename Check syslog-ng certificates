@@ -1,0 +1,208 @@
+#!/bin/bash
+# Syslog-ng Certificates, Keys and Deamon checker
+# Author: Jesus Alatorre
+# December 26 2017
+# Change Dec 29 2017
+#Set variables for time, measured in seconds
+seconds_1h=3600
+seconds_1d=$(($seconds_1h * 24))
+seconds_1w=$(($seconds_1d * 7))
+seconds_30d=$(($seconds_1d * 30))
+seconds_1y=$(($seconds_1d * 365))
+# Other variables, change as needed
+# Syslog-ng all certificates and all keys extracted from the configuration file
+# Parse the cert and key file, there are some nodes like the syslosg were the files apear two times, hence the head command
+KEY_FILE=$(grep "key_file" /opt/syslog-ng/etc/syslog-ng.conf | sed 's/[")]//g' | cut -d"(" -f2- | head -n 1)
+CERT_FILE=$(grep "cert_file" /opt/syslog-ng/etc/syslog-ng.conf | sed 's/[")]//g' | cut -d"(" -f2- | head -n 1)
+# Parse Cert file, Key file and CA File.
+CERTS_FILE_COMPLETE=$(grep -A1 "key_file" /opt/syslog-ng/etc/syslog-ng.conf | sed 's/[")]//g' | sed '/(/ s//:/g')
+#Trim string until get root folder /opt/syslog-ng/etc/ Strip out longest match between k and y
+FOLDER_ETC=$(echo ${KEY_FILE%%k*y})
+#Trim string until get root folder /opt/syslog-ng/, Strip out longest match between e and y
+FOLDER_SYSLOG=$(echo ${KEY_FILE%%e*y})
+# Check certs within 1 day Threashold
+CheckDay(){
+  cert_name=`openssl x509 -subject -noout -in $CERT_FILE | sed 's/^subject.*CN=\([a-zA-Z0-9\.\-\*]*\).*$/\1/'`
+  cert_date=`openssl x509 -enddate -noout -in $CERT_FILE | sed 's/.*=//'`
+  if openssl x509 -checkend $seconds_1d -noout -in $CERT_FILE
+  then
+    :
+  else
+    temp_1d="$temp_1d$cert_name will expire on $cert_date\n"                                                         
+  fi
+}
+# Check certs within one week Threashold
+CheckWeek(){
+  cert_name=`openssl x509 -subject -noout -in $CERT_FILE | sed 's/^subject.*CN=\([a-zA-Z0-9\.\-\*]*\).*$/\1/'`
+  cert_date=`openssl x509 -enddate -noout -in $CERT_FILE | sed 's/.*=//'`
+  if openssl x509 -checkend $seconds_1w -noout -in $CERT_FILE
+  then
+    :
+  else
+    temp_1w="$temp_1w$cert_name will expire on $cert_date\n"                                                         
+  fi
+}
+# Check certs within 30 days Threashold
+Check30(){
+  cert_name=`openssl x509 -subject -noout -in $CERT_FILE | sed 's/^subject.*CN=\([a-zA-Z0-9\.\-\*]*\).*$/\1/'`
+  cert_date=`openssl x509 -enddate -noout -in $CERT_FILE | sed 's/.*=//'`
+  if openssl x509 -checkend $seconds_30d -noout -in $CERT_FILE
+  then
+    :
+  else
+    temp_30d="$temp_30d$cert_name will expire on $cert_date\n"                                                         
+  fi
+}
+#Check for certs expiring in 1 year or less, get their names and expiration dates
+Check_One_Year_Or_Less (){
+  cert_name=`openssl x509 -subject -noout -in $CERT_FILE | sed 's/^subject.*CN=\([a-zA-Z0-9\.\-\*]*\).*$/\1/'`
+  cert_date=`openssl x509 -enddate -noout -in $CERT_FILE | sed 's/.*=//'`
+  if openssl x509 -checkend $seconds_1y -noout -in $CERT_FILE
+  then
+    :
+  else
+    temp_1y="$temp_1y$cert_name will expire on $cert_date\n"
+  fi
+}
+Check_Key(){
+#checks the consistency of an RSA private key
+echo "Checking consistency of RSA private key"
+openssl rsa -in $KEY_FILE -check
+}
+#The modulus and the public exponent portions in the key and the Certificate must match
+Check_Modulus_And_Public_Exponent (){
+echo .
+echo "#############"
+echo "Crypto Match:"
+echo "#############"
+echo "The modulus and the public exponent portions in the key and the Certificate must match,"
+echo "If they don't match will be displayed, like Files PATH and PATH are not identical"
+echo .
+diff -sy <(openssl x509 -noout -modulus -in $CERT_FILE | openssl md5) <(openssl rsa -noout -modulus -in $KEY_FILE | openssl md5)
+echo .
+}
+#if variables exist and are set to something, Alert
+#the "-e" in the echo command parses the "\n" linebreaks above
+#Check that all files have permissions correct
+CheckPermissions(){
+INCORRECT=$(find $FOLDER_ETC -type f -not -perm 640 ! -path "/opt/syslog-ng/etc/syslog-ng.conf")
+if [[ -n $INCORRECT ]]
+then
+    echo "Files with incorrect permissions found:"
+        find $FOLDER_ETC -type f -not -perm 640
+        echo .
+        echo "Files should have 640 permissions per the configuration file states"
+        echo "Executing grep on congiguration file:"
+        grep perm /opt/syslog-ng/etc/syslog-ng.conf
+else
+echo "All Files are correct"
+fi
+CONFIG=$(find /opt/syslog-ng/etc/syslog-ng.conf -type f -not -perm 650)
+if [[ -n $CONFIG ]]
+then
+		echo "Configuration File has incorrect permissions"
+        ls -ltrh /opt/syslog-ng/etc/syslog-ng.conf
+        echo "Configuration File should have 650 permissions"        
+else
+echo "Configuration File is correct"
+fi
+echo "###DONE PERMISSION CHECK###"
+}
+Alert(){
+CheckDay
+CheckWeek
+Check30
+Check_One_Year_Or_Less
+if [ -n "$temp_1d" ] 
+then
+  echo "==ONE Day Threashold ALERT!=="
+  echo "Certificate will expire within a day.Engage a SOC teamember inmediatly and issue an email to all SOC"
+  echo "In the body of the email to SOC state the node and paste the script results"
+  echo "The certificate about to expire is:"
+  echo "$CERT_FILE"
+  echo -e $temp_1d   
+elif [ -n "$temp_1w" ]
+then
+  echo "==One week Threashold WARNING=="
+  echo "Certificate will expire within a week, issue an email warning SOC"
+  echo "In the body of the email to SOC state the node and paste the script results"
+  echo -e $temp_1w
+elif [ -n "$temp_30d" ]
+then
+  echo "Certificate will expire within 30 days, issue an email warning SOC"
+  echo -e $temp_30d
+elif [ -n "$temp_1y" ]
+then
+  echo "Certificate will expire within a year, there is no need to enagage SOC"
+  echo -e $temp_1y
+else
+    echo "Certificate: $cert_name was cheked for expiration within the threasholds stated below:"
+        echo "1.- 30 days expiration"
+        echo "2.- One year or less"
+        echo .
+        echo "=====RESULTS====="
+        echo "1. Certificate OK"
+        echo "2. Certificate OK"
+        echo "Certificate $cert_name will expire on $cert_date"
+fi
+}
+CryptoCheck(){
+Check_Key
+echo .
+Check_Modulus_And_Public_Exponent
+}
+SyslogDetails(){
+echo "Checking Syslog-ng Service status"
+ps cax | grep syslog-ng
+if [ $? -eq 0 ]; then
+  echo "Process is running."
+else
+  echo "Process is not running."
+  echo .
+echo "If Syslog-ng Service status is Not Running start it. Hint on how to check the service using: sudo netstat Â–an grep port 2601"
+echo "Impact of not having the service up:"
+echo "The syslog server. Log data is sent encrypted and is stored encrypted and signed. The signature can be verified using the Balabit CLI, which can also be used to access the plaintext log data. This log destination is the only external log destination which guarantees integrity and confidentiality of the data so that it can be used as a source for forensic investigations."
+echo "How to check signature?, execute:"
+echo "lgstool validate --key=mykey.pem --ca-file=mycacert.pem --ts-name=MYTSA mylogstore.lgs"
+echo "Check for connection errors using sudo cat /var/log/syslog-ng/YEAR/syslog-ng_${HOSTNAME}_DATE.log and grep connection"
+fi
+}
+#Main logic
+file="/opt/syslog-ng/etc/syslog-ng.conf"
+if [ -f "$file" ]
+then
+echo "Configuration File exists path is: $file begining execution of check."
+echo "=============="
+echo "BEGIN OF CHECK"
+echo "=============="
+echo "Starting helth check of Syslog-ng Certificate,Key and Cryptocheck"
+echo "The Certificate and key analyzed are from syslog-ng configuration file, which are the files:"
+echo "$CERTS_FILE_COMPLETE"
+echo .
+echo "+++++++++++++++++++++++++++"
+echo "Starting Expiration Check:"
+echo "+++++++++++++++++++++++++++"
+Alert
+echo .
+echo "+++++++++++++++++++++"
+echo "Starting Crypto Check"
+echo "+++++++++++++++++++++"
+CryptoCheck
+echo .
+echo "++++++++++++++++++++++++++"
+echo "Starting Permission Check"
+echo "++++++++++++++++++++++++++"
+CheckPermissions
+echo .
+echo "+++++++"
+echo "Service"
+echo "+++++++"
+SyslogDetails
+echo .
+echo "=============="
+echo "END OF CHECK"
+echo "=============="
+else
+        echo "Configuration File does not exists in path: $file."
+fi
+exit
